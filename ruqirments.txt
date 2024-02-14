@@ -1,1 +1,22 @@
-pip install pvporcupine pvrecorder vosk openai torch torchaudio omegaconf numpy simpleaudio rich fuzzywuzzy python-Levenshtein comtypes pycaw sounddevice PyYAML python-dotenv
+pip install 
+pyaudio
+vosk
+pydub
+torch
+numpy
+scipy
+num2words
+pvporcupine
+pvrecorder
+openai
+torchaudio
+omegaconf
+simpleaudio
+rich
+fuzzywuzzy
+python-Levenshtein
+comtypes
+pycaw
+sounddevice
+PyYAML
+python-dotenv
