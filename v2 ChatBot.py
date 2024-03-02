@@ -1,94 +1,285 @@
+import asyncio
+import os
+import tempfile
+import pyaudio
+from vosk import Model, KaldiRecognizer
+from pydub import AudioSegment
+from pydub.playback import play
+import torch
+import numpy as np
+from scipy.io.wavfile import write
+import g4f
+import webbrowser
+import wave
+import json
+import re
+from pydub import effects
 import tkinter as tk
-from tkinter import messagebox
-import requests
+from tkinter import scrolledtext
+import threading
+import queue
+from num2words import num2words
+from tkinter import Tk, Canvas, Entry, Text, Button, PhotoImage
+from pathlib import Path
 
 
-class WeatherAirPollutionApp(tk.Tk):
+
+def play_wav(filename):
+    wf = wave.open(filename, 'rb')
+
+    p = pyaudio.PyAudio()
+
+    stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
+                    channels=wf.getnchannels(),
+                    rate=wf.getframerate(),
+                    output=True)
+
+    chunk_size = 1024
+    data = wf.readframes(chunk_size)
+    while data:
+        stream.write(data)
+        data = wf.readframes(chunk_size)
+
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+
+
+def save_wav(audio, sample_rate, path="output.wav"):
+    audio_numpy = audio.cpu().numpy()
+    scaled = np.int16(audio_numpy / np.max(np.abs(audio_numpy)) * 32767)
+    write(path, sample_rate, scaled)
+
+
+# Load Silero TTS model
+def load_silero_model(model_id='v4_ru', device='cpu'):
+    model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models',
+                              model='silero_tts',
+                              language='ru',
+                              speaker=model_id)
+    model.to(device)
+    return model
+
+
+def text_to_speech(text, model, speaker='xenia', sample_rate=48000):
+    if not text or len(text) > 5000:
+        print("Invalid or too long text for TTS.")
+        return
+    try:
+        audio = model.apply_tts(text=text, speaker=speaker, sample_rate=sample_rate)
+        temp_dir = tempfile.gettempdir()
+        temp_file = os.path.join(temp_dir, "speech.wav")
+        save_wav(audio, sample_rate, path=temp_file)
+        audio_segment = AudioSegment.from_wav(temp_file)
+        play(audio_segment)
+        os.remove(temp_file)
+    except Exception as e:
+        print(f"Error during text-to-speech synthesis: {e}")
+
+
+def replace_numbers_with_words(text):
+    return re.sub(r'\b\d+\b', lambda x: num2words(int(x.group()), lang='ru'), text)
+
+
+async def get_response_from_g4f(text, char_limit=700):
+    response = await g4f.ChatCompletion.create_async(
+        model=g4f.models.default,
+        messages=[{"role": "user", "content": text}],
+        provider=g4f.Provider.You,
+    )
+    if response:
+        if len(response) <= char_limit:
+            return response
+        else:
+            last_period_index = response[:char_limit].rfind('.')
+            if last_period_index != -1:
+                truncated_response = response[:last_period_index + 1]
+            else:
+                truncated_response = response[:char_limit]
+            return truncated_response
+    else:
+        return "Sorry, I could not generate a response."
+
+
+OUTPUT_PATH = Path(__file__).parent
+ASSETS_PATH = OUTPUT_PATH / Path("assets/frame0")
+
+
+def relative_to_assets(path: str) -> Path:
+    return ASSETS_PATH / Path(path)
+
+class Application(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Weather and Air Pollution Data")
-        self.geometry("400x400")
+        self.geometry("1720x720")
+        self.configure(bg="#FFFFFF")
 
-        self.api_key = "b9cd298593ba9f5db898d737ff3107bd"
+        self.task_queue = queue.Queue()
+
+        self.canvas = Canvas(
+            self,
+            bg="#FFFFFF",
+            height=720,
+            width=1270,
+            bd=0,
+            highlightthickness=0,
+            relief="ridge"
+        )
+
+        self.canvas.place(x=0, y=0)
+        self.background_image = PhotoImage(file=relative_to_assets("image_1.png"))
+        self.canvas.create_image(
+            635.0,
+            360.0,
+            image=self.background_image
+        )
 
         self.create_widgets()
+        self.process_queue()
 
     def create_widgets(self):
-        self.city_label = tk.Label(self, text="Enter City Name:")
-        self.city_label.pack(pady=(20, 5))
+        button_image_2 = PhotoImage(file=relative_to_assets("button_2.png"))
+        self.button_2 = tk.Button(
+            self,
+            image=button_image_2,
+            borderwidth=0,
+            highlightthickness=0,
+            command=self.start_recognition,
+            relief="flat"
+        )
+        self.button_2.image = button_image_2
+        self.button_2.place(
+            x=815.0,
+            y=439.0,
+            width=78.0,
+            height=72.0
+        )
 
-        self.city_entry = tk.Entry(self)
-        self.city_entry.pack(pady=(0, 20))
 
-        self.weather_button = tk.Button(self, text="Get Weather", command=self.get_weather)
-        self.weather_button.pack()
+        button_image_1 = PhotoImage(file=relative_to_assets("button_1.png"))
+        self.button_1 = tk.Button(
+            self,
+            image=button_image_1,
+            borderwidth=0,
+            highlightthickness=0,
+            command=self.start_recognition,
+            relief="flat"
+        )
+        self.button_1.image = button_image_1
+        self.button_1.place(
+            x=815.0,
+            y=563.0,
+            width=78.0,
+            height=72.0
+        )
 
-        self.air_pollution_button = tk.Button(self, text="Get Air Pollution for Bishkek",
-                                              command=self.get_air_pollution)
-        self.air_pollution_button.pack(pady=20)
 
-        self.result_text = tk.Text(self, height=10, width=50)
-        self.result_text.pack(pady=(20, 0))
 
-    def get_weather(self):
-        city_name = self.city_entry.get()
-        if not city_name:
-            messagebox.showerror("Error", "Please enter a city name")
-            return
-        weather_url = f'https://api.openweathermap.org/data/2.5/weather?q={city_name}&appid={self.api_key}'
-        response = requests.get(weather_url)
-        weather_info = response.json()
 
-        if weather_info['cod'] == 200:
-            kelvin = 273
-            temp = int(weather_info['main']['temp'] - kelvin)
-            feels_like_temp = int(weather_info['main']['feels_like'] - kelvin)
-            humidity = weather_info['main']['humidity']
-            description = weather_info['weather'][0]['description']
 
-            weather = (f"Weather of: {city_name}\n"
-                       f"Temperature (Celsius): {temp}°\n"
-                       f"Feels like (Celsius): {feels_like_temp}°\n"
-                       f"Humidity: {humidity}%\n"
-                       f"Description: {description.capitalize()}")
-        else:
-            weather = f"Weather for '{city_name}' not found! Please enter a valid city name."
-        self.display_result(weather)
 
-    def get_air_pollution(self):
-        lat = 42.8746
-        lon = 74.5698
-        url = f"https://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={lon}&appid={self.api_key}"
-        response = requests.get(url)
-        data = response.json()
-        self.display_air_pollution_data(data)
 
-    def display_air_pollution_data(self, data):
-        if data.get("list"):
-            pollution_data = data["list"][0]
-            aqi = pollution_data["main"]["aqi"]
-            pm25_concentration = pollution_data["components"]["pm2_5"]
-            us_aqi_pm25 = self.calculate_aqi_pm25(pm25_concentration)
 
-            result = (f"OpenWeatherMap AQI: {aqi} (1=Good, 2=Fair, 3=Moderate, 4=Poor, 5=Very Poor)\n"
-                      f"Estimated US AQI for PM2.5: {us_aqi_pm25}\n"
-                      "Pollutant concentrations (µg/m3):\n")
-            for pollutant, value in pollution_data["components"].items():
-                result += f"  {pollutant.upper()}: {value}\n"
-        else:
-            result = "No air pollution data available."
-        self.display_result(result)
+        self.entry_image_1 = PhotoImage(file=relative_to_assets("entry_1.png"))
+        self.entry_bg_1 = self.canvas.create_image(
+            401.0,
+            360.0,
+            image=self.entry_image_1
+        )
+        self.entry_1 = Text(
+            self,
+            bd=0,
+            bg="#CEF39E",
+            fg="#000716",
+            highlightthickness=0,
+            wrap="word",  # Ensure text wraps within the widget
+            font=("Open Sans", 18)  # Adjust font and size as needed
+        )
+        self.entry_1.place(
+            x=0.0,
+            y=0.0,
+            width=802.0,
+            height=718.0
+        )
 
-    def calculate_aqi_pm25(self, concentration):
-        # Your AQI calculation logic here
-        # Simplified for brevity; please insert your original function
-        return round(concentration * 9)  # Placeholder calculation
+    def start_recognition(self):
+        threading.Thread(target=self.run_async_main, daemon=True).start()
+        print("Starting please wait... until you hear something")
 
-    def display_result(self, text):
-        self.result_text.delete(1.0, tk.END)
-        self.result_text.insert(tk.END, text)
+    def run_async_main(self):
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        loop = asyncio.get_event_loop()
+        try:
+            loop.run_until_complete(self.async_main())
+        finally:
+            loop.close()
+
+    async def async_main(self):
+        try:
+            print("CODE IS LAUNCHING, made by \nsha")
+            model_path = "vosk_small"
+            if not os.path.exists(model_path):
+                print(f"Please download and unpack the Vosk model '{model_path}' to the current directory.")
+                return
+            vosk_model = Model(model_path)
+            silero_model = load_silero_model()
+            rec = KaldiRecognizer(vosk_model, 16000)
+            p = pyaudio.PyAudio()
+            stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=4096)
+            print("Скажите свой вопрос, для остановки скажите  -  стоп")
+            greeting_text = "Привет мой господин, я здесь чтобы помочь."
+            text_to_speech(greeting_text, silero_model)
+
+            try:
+                while True:
+                    data = stream.read(4096, exception_on_overflow=False)
+                    if rec.AcceptWaveform(data):
+                        result = json.loads(rec.Result())
+                        text = result.get("text", "").lower()
+                        print("Распознано:", text)
+                        if "стоп" in text:
+                            print("Выхожу...")
+                            break
+                        # if "какой сейчас качество воздуха" in text:
+                        #     text_to_speech("В кыргызстане ужасный воздух", silero_model)
+                        if "белка" in text:
+                            command = re.sub("белка", "", text,
+                                             flags=re.IGNORECASE).strip()
+                            self.safe_print_to_gui(f"Команда: {command}")
+                            if 'включи музыку' in command:
+                                webbrowser.open('https://www.youtube.com/watch?v=dQw4w9WgXcQ')
+                                continue
+                            try:
+                                response = await get_response_from_g4f(command)
+                            except ValueError as e:
+                                print(f"Encountered an error while fetching response: {e}")
+                                response = "Sorry, there was an error fetching the response. Please try again."
+                            response = replace_numbers_with_words(response)
+                            self.safe_print_to_gui(f"Ответ: {response}")
+                            text_to_speech(response, silero_model)
+            finally:
+                stream.stop_stream()
+                stream.close()
+                p.terminate()
+        except Exception as e:
+            print(f"Unexpected error in async_main: {e}")
+
+    def print_to_gui(self, message):
+        self.entry_1.insert(tk.END, message + "\n")
+        self.entry_1.see(tk.END)
+
+    def process_queue(self):
+        try:
+            task = self.task_queue.get_nowait()
+            task()
+        except queue.Empty:
+            pass
+        self.after(100, self.process_queue)
+
+    def safe_print_to_gui(self, message):
+        self.task_queue.put(lambda: self.print_to_gui(message))
 
 
 if __name__ == "__main__":
-    app = WeatherAirPollutionApp()
+    app = Application()
     app.mainloop()
