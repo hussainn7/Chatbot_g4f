@@ -37,12 +37,14 @@ def listen_for_trigger():
             except sr.RequestError as e:
                 print(f"Could not request results; {e}")
 
+
+#check elevenlabs documentation for details
 def speak(text):
-    url = "https://api.elevenlabs.io/v1/text-to-speech/4IMpsgIR3EIjHPezf4eG"
+    url = "https://api.elevenlabs.io/v1/text-to-speech/some-voice-id" 
     headers = {
         "Accept": "audio/mpeg",
         "Content-Type": "application/json",
-        "xi-api-key": "99250370294a2969dc2a5cdfec386b5d"
+        "xi-api-key": "your-id"
     }
     data = {
         "text": text,
